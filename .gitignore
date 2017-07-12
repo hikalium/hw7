@@ -3,3 +3,4 @@ appengine-generated/
 *~
 \#*
 *.pyc
+.DS_Store
