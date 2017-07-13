@@ -1,14 +1,15 @@
 package othello
 
 import (
+	"io"
 	"io/ioutil"
 
+	"golang.org/x/net/context"
 	"google.golang.org/appengine"
 	"google.golang.org/appengine/log"
 
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"net/http"
 )
 
@@ -45,14 +46,20 @@ Paste JSON here:<p/><textarea name=json cols=80 rows=24></textarea>
 		return
 	}
 	board := game.Board
-	log.Infof(ctx, "got board: %v", board)
+	board.PrintLog(ctx)
+	var eval int
+	eval = board.GetEval()
+	log.Infof(ctx, "%v", eval)
 	moves := board.ValidMoves()
 	if len(moves) < 1 {
 		fmt.Fprintf(w, "PASS")
 		return
 	}
-	move := moves[rand.Intn(len(moves))]
-	fmt.Fprintf(w, "[%d,%d]", move.Where[0], move.Where[1])
+	moves.GenMovedBoards(&board)
+	moves.LogAll(ctx)
+	bestIndex := moves.GetBestEvalIndex()
+	move := moves[bestIndex]
+	move.Send(w, ctx)
 }
 
 type Piece int8
@@ -82,31 +89,36 @@ type Board struct {
 	// Layout says what pieces are where.
 	Pieces [8][8]Piece
 	// Next says what the color of the next piece played must be.
-	Next Piece
+	Next      Piece
+	EvalScore int
 }
 
-// Position represents a position on the othello board. Valid board
-// coordinates are 1-8 (not 0-7)!
-type Position [2]int
+type BoardList []Board
 
-// Valid returns true iff this is a valid board position.
-func (p Position) Valid() bool {
-	ok := func(i int) bool { return 1 <= i && i <= 8 }
-	return ok(p[0]) && ok(p[1])
+func (bl *BoardList) LogAll(ctx context.Context) {
+	log.Infof(ctx, "boards:")
+	for _, v := range *bl {
+		v.PrintLog(ctx)
+		log.Infof(ctx, "----")
+	}
 }
 
-// Pass returns true iff this move position represents a pass.
-func (p Position) Pass() bool {
-	return !p.Valid()
-}
+func (b Board) PrintLog(ctx context.Context) {
+	for y := 0; y < 8; y++ {
+		var s string
 
-// Move describes a move on an Othello board.
-type Move struct {
-	// Where a piece is going to be placed. If Where is zeros, or
-	// another invalid coordinate, it indicates a pass.
-	Where Position
-	// As is the player taking the player taking the turn.
-	As Piece
+		for x := 0; x < 8; x++ {
+			switch b.Pieces[y][x] {
+			case White:
+				s += "w "
+			case Black:
+				s += "b "
+			default:
+				s += "  "
+			}
+		}
+		log.Infof(ctx, "%v\n", s)
+	}
 }
 
 // At returns a pointer to the piece at a given position.
@@ -148,6 +160,112 @@ func (b *Board) realMove(m Move) (*Board, error) {
 		*b.At(p) = m.As
 	}
 	return b, nil
+}
+
+func (b Board) GetMovedBoard(m Move) Board {
+	b.Exec(m)
+	return b
+}
+
+func (b *Board) GetEval() int {
+	var eval int
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			switch b.Pieces[y][x] {
+			case White:
+				eval -= 1
+			case Black:
+				eval += 1
+			}
+		}
+	}
+	return eval
+}
+
+func (b *Board) Eval() {
+	var eval int
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			switch b.Pieces[y][x] {
+			case White:
+				eval -= 1
+			case Black:
+				eval += 1
+			}
+		}
+	}
+	b.EvalScore = eval
+}
+
+// Position represents a position on the othello board. Valid board
+// coordinates are 1-8 (not 0-7)!
+type Position [2]int
+
+// Valid returns true iff this is a valid board position.
+func (p Position) Valid() bool {
+	ok := func(i int) bool { return 1 <= i && i <= 8 }
+	return ok(p[0]) && ok(p[1])
+}
+
+// Pass returns true iff this move position represents a pass.
+func (p Position) Pass() bool {
+	return !p.Valid()
+}
+
+// Move describes a move on an Othello board.
+type Move struct {
+	// Where a piece is going to be placed. If Where is zeros, or
+	// another invalid coordinate, it indicates a pass.
+	Where Position
+	// As is the player taking the player taking the turn.
+	As         Piece
+	MovedBoard *Board
+}
+
+func (m Move) Send(w io.Writer, ctx context.Context) {
+	fmt.Fprintf(w, "[%d,%d]", m.Where[0], m.Where[1])
+	m.Log(ctx, "Move to: ")
+}
+
+func (m Move) Log(ctx context.Context, prefix string) {
+	log.Infof(ctx, "%s[%d,%d] (%d)", prefix, m.Where[0], m.Where[1], m.MovedBoard.EvalScore)
+}
+
+type MoveList []Move
+
+func (ml MoveList) LogAll(ctx context.Context) {
+	log.Infof(ctx, "moves:")
+	for _, v := range ml {
+		v.Log(ctx, "")
+	}
+}
+
+func (ml *MoveList) GenMovedBoards(baseBoard *Board) {
+	for index, _ := range *ml {
+		board := baseBoard.GetMovedBoard((*ml)[index])
+		board.Eval()
+		(*ml)[index].MovedBoard = &board
+	}
+}
+
+func (ml *MoveList) GetBestEvalIndex() int {
+	var index int
+	var m int
+	if ml == nil {
+		return -1
+	}
+	index = -1
+	if len(*ml) > 0 {
+		m = (*ml)[0].MovedBoard.EvalScore
+		index = 0
+	}
+	for i := 1; i < len(*ml); i++ {
+		if (*ml)[i].MovedBoard.EvalScore > m {
+			m = (*ml)[i].MovedBoard.EvalScore
+			index = i
+		}
+	}
+	return index
 }
 
 type direction Position
@@ -205,8 +323,8 @@ func (b *Board) findCaptures(m Move, dir direction) []Position {
 	panic("impossible")
 }
 
-func (b *Board) ValidMoves() []Move {
-	var moves []Move
+func (b *Board) ValidMoves() MoveList {
+	var moves MoveList
 	for y := 1; y <= 8; y++ {
 		for x := 1; x <= 8; x++ {
 			m := Move{Where: Position{x, y}, As: b.Next}
