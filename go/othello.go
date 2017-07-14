@@ -18,14 +18,14 @@ var ScoreMap [8][8]int
 func init() {
 	http.HandleFunc("/", getMove)
 	ScoreMap = [8][8]int{
-		{10, 2, 2, 2, 2, 2, 2, 10},
-		{2, 1, 1, 1, 1, 1, 1, 2},
-		{2, 1, 1, 1, 1, 1, 1, 2},
-		{2, 1, 1, 1, 1, 1, 1, 2},
-		{2, 1, 1, 1, 1, 1, 1, 2},
-		{2, 1, 1, 1, 1, 1, 1, 2},
-		{2, 1, 1, 1, 1, 1, 1, 2},
-		{10, 2, 2, 2, 2, 2, 2, 10},
+		{15, 2, 5, 5, 5, 5, 2, 15},
+		{2, 0, 1, 1, 1, 1, 0, 2},
+		{5, 1, 1, 1, 1, 1, 1, 5},
+		{5, 1, 1, 1, 1, 1, 1, 5},
+		{5, 1, 1, 1, 1, 1, 1, 5},
+		{5, 1, 1, 1, 1, 1, 1, 5},
+		{2, 0, 1, 1, 1, 1, 0, 2},
+		{15, 2, 5, 5, 5, 5, 2, 15},
 	}
 }
 
@@ -69,7 +69,7 @@ Paste JSON here:<p/><textarea name=json cols=80 rows=24></textarea>
 		fmt.Fprintf(w, "PASS")
 		return
 	}
-	board.ExpandEvalTree("root:", 6)
+	board.ExpandEvalTree("root:", 5)
 	bestIndex := board.Moves.GetBestEvalIndex(board.Next)
 	board.Moves.Send(bestIndex, w, ctx)
 }
