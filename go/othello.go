@@ -13,16 +13,30 @@ import (
 	"net/http"
 )
 
+var ScoreMap [8][8]int
+
 func init() {
 	http.HandleFunc("/", getMove)
+	ScoreMap = [8][8]int{
+		{10, 2, 2, 2, 2, 2, 2, 10},
+		{2, 1, 1, 1, 1, 1, 1, 2},
+		{2, 1, 1, 1, 1, 1, 1, 2},
+		{2, 1, 1, 1, 1, 1, 1, 2},
+		{2, 1, 1, 1, 1, 1, 1, 2},
+		{2, 1, 1, 1, 1, 1, 1, 2},
+		{2, 1, 1, 1, 1, 1, 1, 2},
+		{10, 2, 2, 2, 2, 2, 2, 10},
+	}
 }
 
 type Game struct {
 	Board Board `json:board`
 }
 
+var ctx context.Context
+
 func getMove(w http.ResponseWriter, r *http.Request) {
-	ctx := appengine.NewContext(r)
+	ctx = appengine.NewContext(r)
 	var js []byte
 	defer r.Body.Close()
 	js, _ = ioutil.ReadAll(r.Body)
@@ -46,20 +60,18 @@ Paste JSON here:<p/><textarea name=json cols=80 rows=24></textarea>
 		return
 	}
 	board := game.Board
+	log.Infof(ctx, "Next: %v", board.Next)
 	board.PrintLog(ctx)
-	var eval int
-	eval = board.GetEval()
-	log.Infof(ctx, "%v", eval)
-	moves := board.ValidMoves()
-	if len(moves) < 1 {
+	board.Eval()
+	log.Infof(ctx, "%v", board.EvalScore)
+	board.Moves = board.ValidMoves()
+	if len(board.Moves) < 1 {
 		fmt.Fprintf(w, "PASS")
 		return
 	}
-	moves.GenMovedBoards(&board)
-	moves.LogAll(ctx)
-	bestIndex := moves.GetBestEvalIndex()
-	move := moves[bestIndex]
-	move.Send(w, ctx)
+	board.ExpandEvalTree("root:", 6)
+	bestIndex := board.Moves.GetBestEvalIndex(board.Next)
+	board.Moves.Send(bestIndex, w, ctx)
 }
 
 type Piece int8
@@ -91,16 +103,7 @@ type Board struct {
 	// Next says what the color of the next piece played must be.
 	Next      Piece
 	EvalScore int
-}
-
-type BoardList []Board
-
-func (bl *BoardList) LogAll(ctx context.Context) {
-	log.Infof(ctx, "boards:")
-	for _, v := range *bl {
-		v.PrintLog(ctx)
-		log.Infof(ctx, "----")
-	}
+	Moves     MoveList
 }
 
 func (b Board) PrintLog(ctx context.Context) {
@@ -173,9 +176,9 @@ func (b *Board) GetEval() int {
 		for x := 0; x < 8; x++ {
 			switch b.Pieces[y][x] {
 			case White:
-				eval -= 1
+				eval -= ScoreMap[y][x]
 			case Black:
-				eval += 1
+				eval += ScoreMap[y][x]
 			}
 		}
 	}
@@ -195,6 +198,52 @@ func (b *Board) Eval() {
 		}
 	}
 	b.EvalScore = eval
+}
+
+func (b *Board) ExpandEvalTree(prefix string, depth int) {
+	var evalScore int
+	if depth == 0 {
+		b.Eval()
+		evalScore = b.EvalScore
+	} else {
+		b.Moves = b.ValidMoves()
+		if len(b.Moves) == 0 {
+			return
+		}
+		b.Moves.GenMovedBoards(b)
+		for _, m := range b.Moves {
+			board := m.MovedBoard
+			board.ExpandEvalTree(m.ToStr(), depth-1)
+		}
+		bestIndex := b.Moves.GetBestEvalIndex(b.Next)
+		if bestIndex < 0 {
+			b.Eval()
+			evalScore = b.EvalScore
+		} else {
+			evalScore = b.Moves[bestIndex].MovedBoard.EvalScore
+			b.EvalScore = evalScore
+		}
+		//log.Infof(ctx, "bestIndex: %d", bestIndex)
+	}
+	/*
+		var s string
+		for i := 0; i < depth; i++ {
+			s += "\t"
+		}
+		s += prefix
+		s += strconv.Itoa(evalScore)
+		log.Infof(ctx, s)
+	*/
+}
+
+type BoardList []Board
+
+func (bl *BoardList) LogAll(ctx context.Context) {
+	log.Infof(ctx, "boards:")
+	for _, v := range *bl {
+		v.PrintLog(ctx)
+		log.Infof(ctx, "----")
+	}
 }
 
 // Position represents a position on the othello board. Valid board
@@ -224,11 +273,15 @@ type Move struct {
 
 func (m Move) Send(w io.Writer, ctx context.Context) {
 	fmt.Fprintf(w, "[%d,%d]", m.Where[0], m.Where[1])
-	m.Log(ctx, "Move to: ")
+	m.Log("Move to: ")
 }
 
-func (m Move) Log(ctx context.Context, prefix string) {
+func (m Move) Log(prefix string) {
 	log.Infof(ctx, "%s[%d,%d] (%d)", prefix, m.Where[0], m.Where[1], m.MovedBoard.EvalScore)
+}
+
+func (m *Move) ToStr() string {
+	return fmt.Sprintf("[%d,%d]", m.Where[0], m.Where[1])
 }
 
 type MoveList []Move
@@ -236,7 +289,7 @@ type MoveList []Move
 func (ml MoveList) LogAll(ctx context.Context) {
 	log.Infof(ctx, "moves:")
 	for _, v := range ml {
-		v.Log(ctx, "")
+		v.Log("")
 	}
 }
 
@@ -248,7 +301,7 @@ func (ml *MoveList) GenMovedBoards(baseBoard *Board) {
 	}
 }
 
-func (ml *MoveList) GetBestEvalIndex() int {
+func (ml *MoveList) GetBestEvalIndex(forPlayer Piece) int {
 	var index int
 	var m int
 	if ml == nil {
@@ -259,13 +312,34 @@ func (ml *MoveList) GetBestEvalIndex() int {
 		m = (*ml)[0].MovedBoard.EvalScore
 		index = 0
 	}
-	for i := 1; i < len(*ml); i++ {
-		if (*ml)[i].MovedBoard.EvalScore > m {
-			m = (*ml)[i].MovedBoard.EvalScore
-			index = i
+	if forPlayer == Black {
+		for i := 1; i < len(*ml); i++ {
+			if (*ml)[i].MovedBoard.EvalScore > m {
+				m = (*ml)[i].MovedBoard.EvalScore
+				index = i
+			}
 		}
+	} else {
+		for i := 1; i < len(*ml); i++ {
+			if (*ml)[i].MovedBoard.EvalScore < m {
+				m = (*ml)[i].MovedBoard.EvalScore
+				index = i
+			}
+		}
+
 	}
 	return index
+}
+
+func (ml *MoveList) Send(index int, w io.Writer, ctx context.Context) {
+	if index < 0 {
+		fmt.Fprintf(w, "PASS")
+		log.Infof(ctx, "Send: PASS")
+		return
+	}
+	m := (*ml)[index]
+	fmt.Fprintf(w, "[%d,%d]", m.Where[0], m.Where[1])
+	m.Log("Send: ")
 }
 
 type direction Position
